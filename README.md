@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.png">
+    <img src="docs/logo.png" alt="Fusetta" width="480">
+  </picture>
+</p>
+
 # Fusetta
 
 An open source FUSE for macOS, built on Apple's FSKit. No kernel extension, no

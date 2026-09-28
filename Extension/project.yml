@@ -31,6 +31,7 @@ targets:
         PRODUCT_NAME: Fusetta
         CODE_SIGN_ENTITLEMENTS: App/Fusetta.entitlements
         GENERATE_INFOPLIST_FILE: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_CFBundleDisplayName: Fusetta
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         INFOPLIST_KEY_NSHumanReadableCopyright: "GPL-2.0-only"
