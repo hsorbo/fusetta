@@ -7,9 +7,9 @@
 
 # Fusetta
 
-An open source FUSE for macOS, built on Apple's FSKit. No kernel extension, no
-reduced security, no closed-source parts: Fusetta is GPL-2.0, and it runs
-**upstream libfuse 3** (LGPL-2.1) with a small macOS mount backend.
+FUSE for macOS, built on Apple's FSKit. Fusetta is fully open source under
+the GPL-2.0 (see [License](#license)). It runs upstream libfuse 3 with a small
+macOS mount backend and needs no kernel extension.
 
 File systems written against libfuse 3 (sshfs, gocryptfs, s3fs, …) build and
 run unmodified. libfuse 2 is not supported.
@@ -18,6 +18,35 @@ run unmodified. libfuse 2 is not supported.
 > (read/write, rename, symlinks, xattrs, chmod, truncate, 20 MB copies, clean
 > unmount from either side), and the protocol layer is covered by tests that
 > run real libfuse file systems.
+
+## Installing with Homebrew
+
+Needs macOS 27 or newer.
+
+```sh
+brew tap hsorbo/tap
+brew trust hsorbo/tap         # Homebrew only loads third-party taps you trust
+brew install --cask fusetta   # Fusetta.app, with fusermount3 linked into Homebrew's bin
+open -a Fusetta
+```
+
+The app shows a setup checklist: enable **fusetta** in System Settings ›
+General › Login Items & Extensions › File System Extensions (it has a button
+for this). The cask already installed the mount helper.
+
+Then install a file system. The tap's sshfs is built against its libfuse,
+which has the Fusetta mount backend:
+
+```sh
+brew install hsorbo/tap/sshfs
+mkdir -p ~/mnt/remote
+sshfs user@host: ~/mnt/remote
+umount ~/mnt/remote
+```
+
+Other libfuse 3 file systems build unmodified against
+`brew install hsorbo/tap/libfuse` (`pkg-config fuse3`). If the System Settings
+switch will not stay on, see [Installing and using](#installing-and-using).
 
 ## How it works
 
@@ -178,6 +207,6 @@ Mostly inherited from FSKit:
 
 ## License
 
-Fusetta is free software under the GNU General Public License, version 2
-(see [LICENSE](LICENSE)). libfuse and `patches/libfuse-3.18.3-darwin.patch`,
-which becomes part of libfuse, are LGPL-2.1.
+Fusetta is licensed under the GNU General Public License, version 2 (see
+[LICENSE](LICENSE)). libfuse and `patches/libfuse-3.18.3-darwin.patch` are
+under libfuse's LGPL-2.1.
