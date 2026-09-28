@@ -66,7 +66,7 @@ processes and is dropped after the first successful handshake.
 | `Sources/fusermount3` | The mount helper libfuse runs; shipped in `Fusetta.app/Contents/MacOS` |
 | `Sources/fusetta-probe` | Debug tool: drives a FUSE file system without FSKit (`ls`, `cat`, `stat`, …) |
 | `Extension/FSExtension` | The FSKit module (`FSUnaryFileSystem` + `FSVolume` v3 handlers) |
-| `Extension/App` | Host app that carries the extension and shows its enablement state |
+| `Extension/App` | Host app that carries the extension; a setup checklist `fusermount3` opens when the extension is off |
 | `Tests/FusettaCoreTests` | Unit tests and end-to-end tests against real libfuse file systems |
 
 ## Requirements
@@ -96,11 +96,13 @@ scripts/build-app.sh
 
 ## Installing and using
 
-1. Copy `Fusetta.app` to `/Applications` and open it once.
+1. Copy `Fusetta.app` to `/Applications` and open it. It shows a setup
+   checklist and quits when you close it; nothing needs it running.
 2. Enable **fusetta** in System Settings › General › Login Items &
    Extensions › File System Extensions (the app has a button for this).
-3. Put the app's `fusermount3` where libfuse finds it: in `$PATH`, or in
-   `/opt/homebrew/bin` or `/usr/local/bin`:
+3. Let the app install the mount helper, or put its `fusermount3` where
+   libfuse finds it yourself: in `$PATH`, or in `/opt/homebrew/bin` or
+   `/usr/local/bin`:
 
    ```sh
    ln -s /Applications/Fusetta.app/Contents/MacOS/fusermount3 /opt/homebrew/bin/
@@ -113,6 +115,9 @@ scripts/build-app.sh
    cat ~/mnt/hello/hello
    umount ~/mnt/hello
    ```
+
+If a mount fails because the extension is off (or not registered),
+`fusermount3` opens the app, unless the session has no screen (ssh).
 
 If the System Settings switch bounces back to off (seen on macOS 27.0
 26A428 for every FSKit extension, Apple's included), `mount` reports

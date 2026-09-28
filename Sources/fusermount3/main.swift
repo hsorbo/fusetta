@@ -23,6 +23,7 @@
 // connects gets the channel.
 
 import Foundation
+import FSKit
 import FusettaCore
 import Security
 
@@ -84,12 +85,15 @@ struct Target {
     var requirement: SecRequirement?
 }
 
+/// Fusetta.app/Contents, if we are its Contents/MacOS/fusermount3.
+func bundleContents() -> URL? {
+    executable(of: getpid())?.deletingLastPathComponent().deletingLastPathComponent()
+}
+
 /// The FusettaFS.appex in the app bundle we ship in: its first app group and
 /// its designated requirement.
 func bundledExtension() -> Target? {
-    guard let exe = executable(of: getpid()) else { return nil }
-    let appex = exe.deletingLastPathComponent().deletingLastPathComponent()
-        .appending(path: "Extensions/FusettaFS.appex")
+    guard let appex = bundleContents()?.appending(path: "Extensions/FusettaFS.appex") else { return nil }
     var code: SecStaticCode?
     var info: CFDictionary?
     var requirement: SecRequirement?
@@ -165,6 +169,37 @@ func run(_ path: String, _ arguments: [String], stderr: Any = FileHandle.standar
     return p
 }
 
+/// Whether FSKit has the extension we ship with enabled; false if it is not
+/// registered, nil if we are not in an app bundle or FSKit does not answer.
+/// FSKit only lists Apple's modules and those of the caller's team, which we
+/// share with the extension.
+func bundledExtensionEnabled() -> Bool? {
+    guard let appex = bundleContents()?.appending(path: "Extensions/FusettaFS.appex"),
+        let id = Bundle(url: appex)?.bundleIdentifier
+    else { return nil }
+    let done = DispatchSemaphore(value: 0)
+    nonisolated(unsafe) var enabled: Bool?
+    FSClient.shared.fetchInstalledExtensions { modules, _ in
+        enabled = modules.map { $0.contains { $0.bundleIdentifier == id && $0.isEnabled } }
+        done.signal()
+    }
+    return done.wait(timeout: .now() + 5) == .success ? enabled : nil
+}
+
+/// Opens the Fusetta.app we ship in, whose window walks through setup, when
+/// this login session has a screen (not over ssh).
+func openSetupApp() {
+    var session = SecuritySessionId()
+    var attributes = SessionAttributeBits()
+    guard SessionGetInfo(SecuritySessionId(bitPattern: -1), &session, &attributes) == errSecSuccess,  // the caller's
+        attributes.contains(.sessionHasGraphicAccess),
+        let app = bundleContents()?.deletingLastPathComponent(), app.pathExtension == "app",
+        let open = try? run("/usr/bin/open", [app.path], stderr: FileHandle.nullDevice)
+    else { return }
+    open.waitUntilExit()
+    if open.terminationStatus == 0 { warn("opened \(app.lastPathComponent) to finish setting up") }
+}
+
 func mountFailed(_ mount: Process, output: Pipe, prefix: String) -> Never {
     mount.waitUntilExit()
     let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
@@ -172,6 +207,9 @@ func mountFailed(_ mount: Process, output: Pipe, prefix: String) -> Never {
     warn("mount failed (status \(mount.terminationStatus))" + (text.isEmpty ? "" : ":\n" + text))
     if text.contains("Loading resource") && text.contains("not permitted") {
         warn("the Fusetta extension may not look up \(prefix).*; is that its app group? (FUSETTA_MACH_PREFIX)")
+    } else if bundledExtensionEnabled() == false {
+        warn("the Fusetta extension is not enabled")
+        openSetupApp()
     } else if text.contains("disabled") || !text.contains(" resource: ") {
         warn("enable Fusetta in System Settings > General > Login Items & Extensions > File System Extensions")
     }
