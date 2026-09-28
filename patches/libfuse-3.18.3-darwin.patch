@@ -1,0 +1,596 @@
+diff --git a/example/meson.build b/example/meson.build
+index f32f892..66e0a18 100644
+--- a/example/meson.build
++++ b/example/meson.build
+@@ -1,9 +1,13 @@
+-examples = [ 'passthrough', 'passthrough_fh',
++examples = [ 'passthrough',
+              'hello', 'hello_ll',
+              'printcap', 'ioctl_client', 'poll_client',
+              'ioctl', 'cuse', 'cuse_client' ]
+ 
+-if not platform.endswith('bsd') and platform != 'dragonfly'
++if platform != 'darwin'
++    examples += [ 'passthrough_fh' ]
++endif
++
++if not platform.endswith('bsd') and platform != 'dragonfly' and platform != 'darwin'
+     examples += [ 'passthrough_ll' ]
+ 
+     if private_cfg.get('HAVE_CUSTOM_IO', false)
+@@ -35,7 +39,7 @@ foreach ex : threaded_examples
+                install: false)
+ endforeach
+ 
+-if platform != 'dragonfly' and add_languages('cpp', required : false)
++if platform != 'dragonfly' and platform != 'darwin' and add_languages('cpp', required : false)
+     executable('passthrough_hp', 'passthrough_hp.cc',
+                dependencies: [ thread_dep, libfuse_dep ],
+                install: false)
+diff --git a/example/passthrough.c b/example/passthrough.c
+index 81a265a..816e929 100644
+--- a/example/passthrough.c
++++ b/example/passthrough.c
+@@ -312,10 +312,12 @@ static int xmp_open(const char *path, struct fuse_file_info *fi)
+         /* Enable direct_io when open has flags O_DIRECT to enjoy the feature
+         parallel_direct_writes (i.e., to get a shared lock, not exclusive lock,
+         for writes to the same file). */
++#ifdef O_DIRECT
+ 	if (fi->flags & O_DIRECT) {
+ 		fi->direct_io = 1;
+ 		fi->parallel_direct_writes = 1;
+ 	}
++#endif
+ 
+ 	fi->fh = res;
+ 	return 0;
+@@ -421,6 +423,14 @@ static int xmp_fallocate(const char *path, int mode,
+ 	return res;
+ }
+ 
++#if defined(HAVE_SETXATTR) && defined(__APPLE__)
++/* Darwin's xattr calls take a position and XATTR_NOFOLLOW instead of l*(). */
++#define lsetxattr(p, n, v, s, f) setxattr(p, n, v, s, 0, (f) | XATTR_NOFOLLOW)
++#define lgetxattr(p, n, v, s) getxattr(p, n, v, s, 0, XATTR_NOFOLLOW)
++#define llistxattr(p, l, s) listxattr(p, l, s, XATTR_NOFOLLOW)
++#define lremovexattr(p, n) removexattr(p, n, XATTR_NOFOLLOW)
++#endif
++
+ #ifdef HAVE_SETXATTR
+ /* xattr operations are optional and can safely be left unimplemented */
+ static int xmp_setxattr(const char *path, const char *name, const char *value,
+diff --git a/lib/fuse.c b/lib/fuse.c
+index a000981..a71b8f8 100644
+--- a/lib/fuse.c
++++ b/lib/fuse.c
+@@ -2845,12 +2845,18 @@ static void fuse_lib_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
+ 			if (valid & FUSE_SET_ATTR_ATIME_NOW)
+ 				tv[0].tv_nsec = UTIME_NOW;
+ 			else if (valid & FUSE_SET_ATTR_ATIME)
+-				tv[0] = attr->st_atim;
++				tv[0] = (struct timespec) {
++					.tv_sec = attr->st_atime,
++					.tv_nsec = ST_ATIM_NSEC(attr),
++				};
+ 
+ 			if (valid & FUSE_SET_ATTR_MTIME_NOW)
+ 				tv[1].tv_nsec = UTIME_NOW;
+ 			else if (valid & FUSE_SET_ATTR_MTIME)
+-				tv[1] = attr->st_mtim;
++				tv[1] = (struct timespec) {
++					.tv_sec = attr->st_mtime,
++					.tv_nsec = ST_MTIM_NSEC(attr),
++				};
+ 
+ 			err = fuse_fs_utimens(f->fs, path, tv, fi);
+ 		} else
+diff --git a/lib/fuse_i.h b/lib/fuse_i.h
+index fa8d26b..76b1996 100644
+--- a/lib/fuse_i.h
++++ b/lib/fuse_i.h
+@@ -215,6 +215,9 @@ void destroy_mount_opts(struct mount_opts *mo);
+ void fuse_mount_version(void);
+ unsigned get_max_read(struct mount_opts *o);
+ void fuse_kern_unmount(const char *mountpoint, int fd);
++#ifdef __APPLE__
++int fuse_darwin_session_attach(struct fuse_session *se, int fd);
++#endif
+ int fuse_kern_mount(const char *mountpoint, struct mount_opts *mo);
+ 
+ int fuse_send_reply_iov_nofree(fuse_req_t req, int error, struct iovec *iov,
+diff --git a/lib/fuse_lowlevel.c b/lib/fuse_lowlevel.c
+index 00c2815..31c1e04 100644
+--- a/lib/fuse_lowlevel.c
++++ b/lib/fuse_lowlevel.c
+@@ -4406,6 +4406,13 @@ int fuse_session_mount(struct fuse_session *se, const char *_mountpoint)
+ 	fd = fuse_kern_mount(mountpoint, se->mo);
+ 	if (fd == -1)
+ 		goto error_out;
++#ifdef __APPLE__
++	/* The channel is a stream socket to the FSKit extension. */
++	if (fuse_darwin_session_attach(se, fd) != 0) {
++		close(fd);
++		goto error_out;
++	}
++#endif
+ 
+ out:
+ 	se->fd = fd;
+diff --git a/lib/fuse_uring.c b/lib/fuse_uring.c
+index 8268fc8..baa38e5 100644
+--- a/lib/fuse_uring.c
++++ b/lib/fuse_uring.c
+@@ -678,7 +678,7 @@ static int fuse_uring_queue_handle_cqes(struct fuse_ring_queue *queue)
+ 
+ 			switch (err) {
+ 			case -EAGAIN:
+-				fallthrough;
++				FUSE_FALLTHROUGH;
+ 			case -EINTR:
+ 				ent = io_uring_cqe_get_data(cqe);
+ 				fuse_uring_resubmit(queue, ent);
+diff --git a/lib/meson.build b/lib/meson.build
+index fcd9574..44a4be5 100644
+--- a/lib/meson.build
++++ b/lib/meson.build
+@@ -6,6 +6,8 @@ libfuse_sources = ['fuse.c', 'fuse_i.h', 'fuse_loop.c', 'fuse_loop_mt.c',
+ 
+ if host_machine.system().startswith('linux')
+    libfuse_sources += [ 'mount.c' ]
++elif host_machine.system() == 'darwin'
++   libfuse_sources += [ 'mount_darwin.c' ]
+ else
+    libfuse_sources += [ 'mount_bsd.c' ]
+ endif
+@@ -35,12 +37,23 @@ endif
+ if host_machine.system().startswith('netbsd')
+    deps += [ cc.find_library('perfuse'),
+              cc.find_library('puffs') ]
++elif host_machine.system() == 'darwin'
++   # clock_gettime is in libSystem on macOS.
+ else
+    # Required for clock_gettime before glibc 2.17
+    deps += cc.find_library('rt')
+ endif
+ 
+ fusermount_path = join_paths(get_option('prefix'), get_option('bindir'))
++# Apple's linker has no GNU version scripts.
++link_depends = []
++link_args = []
++if host_machine.system() != 'darwin'
++   link_depends = 'fuse_versionscript'
++   link_args = ['-Wl,--version-script,' + meson.current_source_dir()
++                + '/fuse_versionscript' ]
++endif
++
+ libfuse = library('fuse3',
+                   libfuse_sources,
+                   version: base_version,
+@@ -48,11 +61,10 @@ libfuse = library('fuse3',
+                   include_directories: include_dirs,
+                   dependencies: deps,
+                   install: true,
+-                  link_depends: 'fuse_versionscript',
++                  link_depends: link_depends,
+                   c_args: [ '-DFUSE_USE_VERSION=317',
+                             '-DFUSERMOUNT_DIR="@0@"'.format(fusermount_path) ],
+-                  link_args: ['-Wl,--version-script,' + meson.current_source_dir()
+-                              + '/fuse_versionscript' ])
++                  link_args: link_args)
+ 
+ pkg = import('pkgconfig')
+ pkg.generate(libraries: [ libfuse, '-lpthread' ],
+diff --git a/lib/mount_darwin.c b/lib/mount_darwin.c
+new file mode 100644
+index 0000000..a527576
+--- /dev/null
++++ b/lib/mount_darwin.c
+@@ -0,0 +1,344 @@
++/*
++ * FUSE: Filesystem in Userspace
++ * Darwin mount backend.
++ *
++ * Copyright (C) 2026 Håvard Sørbø <havard@hsorbo.no>
++ *
++ * This program can be distributed under the terms of the GNU LGPLv2.
++ * See the file LGPL2.txt.
++ *
++ * As in mount.c without root, fusermount3 mounts and passes back the
++ * channel over $_FUSE_COMMFD; unknown -o options go to it. The channel is a
++ * stream socket (no SOCK_SEQPACKET on macOS), so I/O is reframed.
++ */
++
++#include "fuse_config.h"
++#include "fuse_i.h"
++#include "fuse_kernel.h"
++/* libfuse >= 3.19 moved the mount option declarations out of fuse_i.h. */
++#if __has_include("mount_common_i.h")
++#include "mount_common_i.h"
++#define MOUNT_OPTS_CONST const
++#else
++#define MOUNT_OPTS_CONST
++#endif
++#include "fuse_misc.h"
++#include "fuse_opt.h"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <limits.h>
++#include <pthread.h>
++#include <spawn.h>
++#include <stddef.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/uio.h>
++#include <sys/wait.h>
++#include <unistd.h>
++
++extern char **environ;
++
++#define FUSERMOUNT_PROG		"fusermount3"
++#define FUSE_COMMFD_ENV		"_FUSE_COMMFD"
++
++struct mount_opts {
++	char *helper_opts;
++	unsigned int max_read;
++};
++
++enum {
++	KEY_RO,
++};
++
++static const struct fuse_opt fuse_mount_opts[] = {
++	{ "max_read=%u", offsetof(struct mount_opts, max_read), 0 },
++	FUSE_OPT_KEY("-r", KEY_RO),
++	FUSE_OPT_END
++};
++
++unsigned int get_max_read(MOUNT_OPTS_CONST struct mount_opts *o)
++{
++	return o->max_read;
++}
++
++static int fuse_mount_opt_proc(void *data, const char *arg, int key,
++			       struct fuse_args *outargs)
++{
++	struct mount_opts *mo = data;
++
++	(void) outargs;
++
++	switch (key) {
++	case KEY_RO:
++		return fuse_opt_add_opt(&mo->helper_opts, "ro");
++	case FUSE_OPT_KEY_OPT:
++		return fuse_opt_add_opt_escaped(&mo->helper_opts, arg);
++	}
++	return 1;
++}
++
++struct mount_opts *parse_mount_opts(struct fuse_args *args)
++{
++	struct mount_opts *mo = calloc(1, sizeof(*mo));
++
++	if (mo == NULL)
++		return NULL;
++	if (args &&
++	    fuse_opt_parse(args, mo, fuse_mount_opts, fuse_mount_opt_proc) == -1) {
++		destroy_mount_opts(mo);
++		return NULL;
++	}
++	return mo;
++}
++
++void destroy_mount_opts(struct mount_opts *mo)
++{
++	if (mo == NULL)
++		return;
++	free(mo->helper_opts);
++	free(mo);
++}
++
++static pthread_mutex_t read_lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_mutex_t write_lock = PTHREAD_MUTEX_INITIALIZER;
++
++static void unlock_mutex(void *m)
++{
++	pthread_mutex_unlock(m);
++}
++
++/* Bytes read, 0 on EOF, or -errno; EINTR lets fuse_session_exit() work. */
++static ssize_t read_exact(int fd, void *buf, size_t len, int allow_eintr)
++{
++	size_t got = 0;
++
++	while (got < len) {
++		ssize_t n = recv(fd, (char *) buf + got, len - got, 0);
++
++		if (n < 0) {
++			if (errno == EINTR && (!allow_eintr || got > 0))
++				continue;
++			return -errno;
++		}
++		if (n == 0)
++			return got == 0 ? 0 : -ECONNRESET;
++		got += (size_t) n;
++	}
++	return (ssize_t) got;
++}
++
++static ssize_t darwin_read(int fd, void *buf, size_t buf_len, void *userdata)
++{
++	struct fuse_in_header *in = buf;
++	ssize_t res;
++
++	(void) userdata;
++	if (buf_len < sizeof(*in))
++		return -EINVAL;
++
++	pthread_mutex_lock(&read_lock);
++	pthread_cleanup_push(unlock_mutex, &read_lock);
++
++	res = read_exact(fd, buf, sizeof(*in), 1);
++	if (res > 0) {
++		if (in->len < sizeof(*in) || in->len > buf_len) {
++			fuse_log(FUSE_LOG_ERR,
++				 "fuse: bad request length %u (buffer %zu)\n",
++				 in->len, buf_len);
++			res = -EIO;
++		} else if (in->len > sizeof(*in)) {
++			res = read_exact(fd, (char *) buf + sizeof(*in),
++					 in->len - sizeof(*in), 0);
++			if (res == 0)
++				res = -ECONNRESET;
++			if (res > 0)
++				res = in->len;
++		} else {
++			res = in->len;
++		}
++	}
++	if (res == 0 || res == -ECONNRESET)
++		res = -ENODEV;
++
++	pthread_cleanup_pop(1);
++	return res;
++}
++
++static ssize_t darwin_writev(int fd, struct iovec *iov, int count,
++			     void *userdata)
++{
++	ssize_t total = 0, res = 0;
++
++	(void) userdata;
++	pthread_mutex_lock(&write_lock);
++	pthread_cleanup_push(unlock_mutex, &write_lock);
++	while (count > 0) {
++		res = writev(fd, iov, count);
++		if (res < 0) {
++			if (errno == EINTR || errno == EAGAIN)
++				continue;
++			res = -errno;
++			break;
++		}
++		total += res;
++		while (count > 0 && (size_t) res >= iov->iov_len) {
++			res -= (ssize_t) iov->iov_len;
++			iov++;
++			count--;
++		}
++		if (count > 0) {
++			iov->iov_base = (char *) iov->iov_base + res;
++			iov->iov_len -= (size_t) res;
++		}
++		res = total;
++	}
++	pthread_cleanup_pop(1);
++	return res < 0 ? res : total;
++}
++
++static const struct fuse_custom_io darwin_io = {
++	.writev = darwin_writev,
++	.read = darwin_read,
++};
++
++int fuse_darwin_session_attach(struct fuse_session *se, int fd)
++{
++	return fuse_session_custom_io_317(se, &darwin_io, sizeof(darwin_io), fd);
++}
++
++/* Fallbacks when fusermount3 is not in $PATH (e.g. under launchd). */
++static const char *const helper_dirs[] = {
++	FUSERMOUNT_DIR, "/opt/homebrew/bin", "/usr/local/bin", NULL
++};
++
++static int spawn_helper(const char *const argv[],
++			posix_spawn_file_actions_t *fa, pid_t *pid)
++{
++	char path[PATH_MAX];
++	int res = posix_spawnp(pid, FUSERMOUNT_PROG, fa, NULL,
++			       (char *const *) argv, environ);
++
++	for (int i = 0; res != 0 && helper_dirs[i]; i++) {
++		snprintf(path, sizeof(path), "%s/" FUSERMOUNT_PROG,
++			 helper_dirs[i]);
++		res = posix_spawn(pid, path, fa, NULL, (char *const *) argv,
++				  environ);
++	}
++	if (res != 0)
++		fuse_log(FUSE_LOG_ERR, "fuse: cannot run %s: %s\n",
++			 FUSERMOUNT_PROG, strerror(res));
++	return res == 0 ? 0 : -1;
++}
++
++void fuse_mount_version(void)
++{
++	const char *const argv[] = { FUSERMOUNT_PROG, "--version", NULL };
++	pid_t pid;
++
++	if (spawn_helper(argv, NULL, &pid) == 0)
++		waitpid(pid, NULL, 0);
++}
++
++/* From mount.c. */
++static int receive_fd(int fd)
++{
++	struct msghdr msg;
++	struct iovec iov;
++	char buf[1];
++	ssize_t rv;
++	size_t ccmsg[CMSG_SPACE(sizeof(int)) / sizeof(size_t)];
++	struct cmsghdr *cmsg;
++
++	iov.iov_base = buf;
++	iov.iov_len = 1;
++
++	memset(&msg, 0, sizeof(msg));
++	msg.msg_iov = &iov;
++	msg.msg_iovlen = 1;
++	msg.msg_control = ccmsg;
++	msg.msg_controllen = sizeof(ccmsg);
++
++	while ((rv = recvmsg(fd, &msg, 0)) == -1 && errno == EINTR)
++		;
++	if (rv <= 0)
++		return -1;
++
++	cmsg = CMSG_FIRSTHDR(&msg);
++	if (!cmsg || cmsg->cmsg_type != SCM_RIGHTS) {
++		fuse_log(FUSE_LOG_ERR, "fuse: %s sent no file descriptor\n",
++			 FUSERMOUNT_PROG);
++		return -1;
++	}
++	return *(int *) CMSG_DATA(cmsg);
++}
++
++int fuse_kern_mount(const char *mountpoint, struct mount_opts *mo)
++{
++	const char *const argv[] = {
++		FUSERMOUNT_PROG, "-o", mo->helper_opts ? mo->helper_opts : "",
++		"--", mountpoint, NULL
++	};
++	posix_spawn_file_actions_t fa;
++	char commfd[16];
++	int fds[2], fd, status = 0, one = 1;
++	pid_t pid;
++
++	if (mountpoint == NULL) {
++		fuse_log(FUSE_LOG_ERR, "fuse: missing mountpoint parameter\n");
++		return -1;
++	}
++	if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0) {
++		fuse_log(FUSE_LOG_ERR, "fuse: socketpair: %s\n", strerror(errno));
++		return -1;
++	}
++	snprintf(commfd, sizeof(commfd), "%i", fds[0]);
++	setenv(FUSE_COMMFD_ENV, commfd, 1);
++	posix_spawn_file_actions_init(&fa);
++	posix_spawn_file_actions_addclose(&fa, fds[1]);
++	status = spawn_helper(argv, &fa, &pid);
++	posix_spawn_file_actions_destroy(&fa);
++	unsetenv(FUSE_COMMFD_ENV);
++	close(fds[0]);
++	if (status < 0) {
++		close(fds[1]);
++		return -1;
++	}
++
++	fd = receive_fd(fds[1]);
++	close(fds[1]);
++	waitpid(pid, &status, 0);
++	if (fd >= 0 && !(WIFEXITED(status) && WEXITSTATUS(status) == 0)) {
++		close(fd);
++		fd = -1;
++	}
++	if (fd < 0)
++		return -1;
++
++	fcntl(fd, F_SETFD, FD_CLOEXEC);
++	setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
++	{
++		int size = 4 * 1024 * 1024;
++
++		setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
++		setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
++	}
++	return fd;
++}
++
++void fuse_kern_unmount(const char *mountpoint, int fd)
++{
++	const char *const argv[] = {
++		FUSERMOUNT_PROG, "-u", "-q", "-z", "--", mountpoint, NULL
++	};
++	pid_t pid;
++
++	if (fd >= 0) {
++		shutdown(fd, SHUT_RDWR);
++		close(fd);
++	}
++	if (mountpoint && spawn_helper(argv, NULL, &pid) == 0)
++		waitpid(pid, NULL, 0);
++}
+diff --git a/lib/mount_util.c b/lib/mount_util.c
+index 9a02745..21fae69 100644
+--- a/lib/mount_util.c
++++ b/lib/mount_util.c
+@@ -22,7 +22,7 @@
+ #include <fcntl.h>
+ #include <limits.h>
+ #include <paths.h>
+-#if !defined( __NetBSD__) && !defined(__FreeBSD__) && !defined(__DragonFly__) && !defined(__ANDROID__)
++#if !defined( __NetBSD__) && !defined(__FreeBSD__) && !defined(__DragonFly__) && !defined(__ANDROID__) && !defined(__APPLE__)
+ #include <mntent.h>
+ #else
+ #define IGNORE_MTAB
+@@ -34,7 +34,7 @@
+ 
+ #include <sys/param.h>
+ 
+-#if defined(__NetBSD__) || defined(__FreeBSD__) || defined(__DragonFly__) || defined(__FreeBSD_kernel__)
++#if defined(__NetBSD__) || defined(__FreeBSD__) || defined(__DragonFly__) || defined(__FreeBSD_kernel__) || defined(__APPLE__)
+ #define umount2(mnt, flags) unmount(mnt, ((flags) == 2) ? MNT_FORCE : 0)
+ #endif
+ 
+diff --git a/lib/util.h b/lib/util.h
+index 107a2bf..46e40d1 100644
+--- a/lib/util.h
++++ b/lib/util.h
+@@ -41,9 +41,9 @@ static inline uint64_t fuse_higher_32_bits(uint64_t nr)
+ 	})
+ 
+ #if __has_attribute(__fallthrough__)
+-#define fallthrough __attribute__((__fallthrough__))
++#define FUSE_FALLTHROUGH __attribute__((__fallthrough__))
+ #else
+-#define fallthrough do {} while (0)
++#define FUSE_FALLTHROUGH do {} while (0)
+ #endif
+ 
+ #endif /* FUSE_UTIL_H_ */
+diff --git a/meson.build b/meson.build
+index 1e6cbb7..0da8bf6 100644
+--- a/meson.build
++++ b/meson.build
+@@ -24,11 +24,7 @@ FUSE_HOTFIX_VERSION = version_list[2]
+ FUSE_RC_VERSION = version_parts.length() > 1 ? version_parts[1] : ''
+ 
+ platform = host_machine.system()
+-if platform == 'darwin'
+-  error('libfuse does not support OS-X.\n' +
+-        'Take a look at http://osxfuse.github.io/ or the more recent\n' +
+-        'https://www.fuse-t.org/ instead')
+-elif platform == 'cygwin' or platform == 'windows'
++if platform == 'cygwin' or platform == 'windows'
+   error('libfuse does not support Windows.\n' +
+         'Take a look at http://www.secfs.net/winfsp/ instead')       
+ endif
+@@ -324,7 +320,7 @@ thread_dep = dependency('threads')
+ # Read build files from sub-directories
+ #
+ subdirs = [ 'lib', 'include']
+-if get_option('utils') and not platform.endswith('bsd') and platform != 'dragonfly'
++if get_option('utils') and not platform.endswith('bsd') and platform != 'dragonfly' and platform != 'darwin'
+   subdirs += [ 'util', 'doc' ]
+ endif
+ 

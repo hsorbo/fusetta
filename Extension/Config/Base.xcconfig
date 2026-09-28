@@ -1,0 +1,5 @@
+// Shared settings. Local overrides (team, bundle id prefix) live in
+// Local.xcconfig, which is not checked in.
+BUNDLE_ID_PREFIX = org.fusetta
+DEVELOPMENT_TEAM =
+#include? "Local.xcconfig"

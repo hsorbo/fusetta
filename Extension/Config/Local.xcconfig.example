@@ -1,0 +1,4 @@
+// Copy to Local.xcconfig and fill in.
+DEVELOPMENT_TEAM = ABCDE12345
+// Bundle identifiers must be unique to your team.
+BUNDLE_ID_PREFIX = com.example

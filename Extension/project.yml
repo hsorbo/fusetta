@@ -1,0 +1,76 @@
+# XcodeGen spec for the host app and the FSKit extension.
+#   brew install xcodegen && xcodegen generate
+# Signing: copy Config/Local.xcconfig.example to Config/Local.xcconfig and set
+# DEVELOPMENT_TEAM (the FSKit entitlement needs a paid developer team).
+name: Fusetta
+options:
+  deploymentTarget:
+    macOS: "27.0"
+  createIntermediateGroups: true
+configFiles:
+  Debug: Config/Base.xcconfig
+  Release: Config/Base.xcconfig
+packages:
+  fusetta:
+    path: ..
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_HARDENED_RUNTIME: YES
+    CODE_SIGN_STYLE: Automatic
+targets:
+  Fusetta:
+    type: application
+    platform: macOS
+    sources: [App]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).Fusetta
+        PRODUCT_NAME: Fusetta
+        CODE_SIGN_ENTITLEMENTS: App/Fusetta.entitlements
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Fusetta
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+        INFOPLIST_KEY_NSHumanReadableCopyright: "GPL-2.0-only"
+    dependencies:
+      - target: FusettaFS
+        embed: true
+        codeSign: true
+      # libfuse's mount helper; finds the extension relative to itself.
+      - target: fusermount3
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
+
+  FusettaFS:
+    type: extensionkit-extension
+    platform: macOS
+    sources: [FSExtension]
+    dependencies:
+      - package: fusetta
+        product: FusettaCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).Fusetta.fsmodule
+        PRODUCT_NAME: FusettaFS
+        CODE_SIGN_ENTITLEMENTS: FSExtension/FusettaFS.entitlements
+        INFOPLIST_FILE: FSExtension/Info.plist
+        ENABLE_APP_SANDBOX: YES
+        SKIP_INSTALL: YES
+
+  fusermount3:
+    type: tool
+    platform: macOS
+    sources:
+      - path: ../Sources/fusermount3
+    dependencies:
+      - package: fusetta
+        product: FusettaCore
+    settings:
+      base:
+        PRODUCT_NAME: fusermount3
+        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).fusermount3
+        SKIP_INSTALL: YES

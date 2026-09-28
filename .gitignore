@@ -1,0 +1,9 @@
+.build/
+build/
+.swiftpm/
+xcuserdata/
+*.xcuserstate
+DerivedData/
+Extension/Fusetta.xcodeproj/
+Extension/Config/Local.xcconfig
+.DS_Store
